@@ -101,8 +101,8 @@ Frontend displays:
 
 #  Author
 
-**Anirudh Gowri Sankaran**
-**Aadesh Kumar Yadav**
-**Atharva Garg**
-**Carolin Anto Vazhappilly**
-**Bhavani Srinivasan**
+- **Anirudh Gowri Sankaran**
+- **Aadesh Kumar Yadav**
+- **Atharva Garg**
+- **Carolin Anto Vazhappilly**
+- **Bhavani Srinivasan**
