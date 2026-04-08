@@ -2,6 +2,9 @@ import re
 import subprocess
 
 def select_best(query, candidates, mode="service"):
+    if not candidates:
+        return None
+
     options = ""
     for i, c in enumerate(candidates):
         options += f"{i+1}. {c['text']}\n"
@@ -46,15 +49,15 @@ Return ONLY the option number (1, 2, 3, ...). Do not explain.
         print("LLM RAW OUTPUT:", output)  # debug
 
         match = re.search(r'\d+', output)
-        if not match:
-            return None
+        if match:
+            idx = int(match.group()) - 1
 
-        idx = int(match.group()) - 1
-
-        if 0 <= idx < len(candidates):
-            return candidates[idx]["row"]
+            if 0 <= idx < len(candidates):
+                return candidates[idx]   # ✅ return full item
 
     except Exception as e:
         print("Selector error:", e)
 
-    return None
+    # 🔥 FALLBACK (VERY IMPORTANT)
+    print("⚠️ Using fallback (top similarity result)")
+    return candidates[0]

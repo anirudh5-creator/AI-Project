@@ -1,108 +1,100 @@
 import pandas as pd
+import numpy as np
 import re
-from sentence_transformers import SentenceTransformer, CrossEncoder, util
+from sentence_transformers import SentenceTransformer, util
+
+
+# 🔹 Preprocess query (IMPORTANT FIX)
+def preprocess_query(query):
+    numbers = re.findall(r'\d+', query)
+    price = int(numbers[0]) if numbers else None
+    clean_query = re.sub(r'\d+', '', query).strip()
+    return clean_query, price
+
 
 class GSTRetriever:
     def __init__(self, csv_path):
+        # Load data
         self.df = pd.read_csv(csv_path)
 
-        # Clean text
-        self.df['search_text'] = self.df['Description of Service'].fillna('').astype(str).str.lower()
+        # Load model
+        self.model = SentenceTransformer('all-MiniLM-L6-v2')
 
-        # 🔥 Define models properly
-        self.bi_encoder = SentenceTransformer('all-MiniLM-L6-v2')
-        self.cross_encoder = CrossEncoder('cross-encoder/ms-marco-MiniLM-L-6-v2')
+        # Store descriptions
+        self.descriptions = self.df['Description of Service'].astype(str).tolist()
 
         # Precompute embeddings
-        self.embeddings = self.bi_encoder.encode(
-            self.df['search_text'].tolist(),
-            convert_to_tensor=True
-        )
+        print("🔄 Encoding service descriptions...")
+        self.embeddings = self.model.encode(self.descriptions, convert_to_tensor=True)
 
-    # -------------------------
-    # Price Extraction
-    # -------------------------
-    def extract_price(self, text):
-        text = text.lower().replace(',', '')
+    # 🔥 FIXED METHOD (proper indentation)
+    def get_top_k(self, query, k=3):
+        query_text, _ = preprocess_query(query)
 
-        lakh_match = re.search(r'(\d+(\.\d+)?)\s*lakh', text)
-        if lakh_match:
-            return float(lakh_match.group(1)) * 100000
+        if not query_text:
+            return []
 
-        k_match = re.search(r'(\d+(\.\d+)?)\s*k', text)
-        if k_match:
-            return float(k_match.group(1)) * 1000
+        query_embedding = self.model.encode(query_text, convert_to_tensor=True)
 
-        raw_numbers = re.findall(r'\d{4,}', text)
-        if raw_numbers:
-            return float(raw_numbers[0])
+        scores = util.cos_sim(query_embedding, self.embeddings)[0]
 
-        return None
-    
-    def get_top_k(self, query, k=5):
-        query_emb = self.bi_encoder.encode(query, convert_to_tensor=True)
-
-        hits = util.semantic_search(query_emb, self.embeddings, top_k=k)[0]
+        top_k = min(k, len(scores))
+        top_indices = scores.topk(top_k).indices.tolist()
 
         results = []
-        for hit in hits:
-            row = self.df.iloc[hit['corpus_id']]
+        for idx in top_indices:
+            row = self.df.iloc[idx]
+
             results.append({
-                "text": row['Description of Service'],
-                "row": row
+                "text": row['Description of Service'],  # ✅ required
+                "row": row                              # ✅ full data
             })
 
         return results
-    
-        def get_top_k(self, query, k=5):
-            query_emb = self.bi_encoder.encode(query, convert_to_tensor=True)
 
-            hits = util.semantic_search(query_emb, self.embeddings, top_k=k)[0]
+    def retrieve(self, query):
+        try:
+            query_text, price = preprocess_query(query)
 
-            results = []
-            for hit in hits:
-                row = self.df.iloc[hit['corpus_id']]
-                results.append({
-                    "text": row['Description of Service'],
-                    "row": row
-                })
+            if not query_text:
+                return "❌ Please enter a valid service description."
 
-            return results
+            query_embedding = self.model.encode(query_text, convert_to_tensor=True)
+            scores = util.cos_sim(query_embedding, self.embeddings)[0]
 
-    # -------------------------
-    # Retrieval (Bi + Cross Encoder)
-    # -------------------------
-    def get_gst_info(self, query):
-        query_emb = self.bi_encoder.encode(query, convert_to_tensor=True)
+            best_idx = int(np.argmax(scores))
+            best_score = float(scores[best_idx])
 
-        hits = util.semantic_search(query_emb, self.embeddings, top_k=10)[0]
+            if best_score < 0.3:
+                return "❌ Could not determine best service category."
 
-        candidates = [
-            self.df.iloc[hit['corpus_id']]['search_text']
-            for hit in hits
-        ]
+            row = self.df.iloc[best_idx]
+            description = row['Description of Service']
 
-        model_inputs = [[query, cand] for cand in candidates]
-        cross_scores = self.cross_encoder.predict(model_inputs)
+            if 'GST Rate' in self.df.columns:
+                gst_rate = float(row['GST Rate'])
+            elif 'IGST Rate' in self.df.columns:
+                gst_rate = float(row['IGST Rate'])
+            else:
+                gst_rate = 18.0
 
-        # Re-rank
-        for i in range(len(hits)):
-            hits[i]['score'] = cross_scores[i]
+            if price:
+                gst_amount = (price * gst_rate) / 100
+                total = price + gst_amount
 
-        hits = sorted(hits, key=lambda x: x['score'], reverse=True)
-        best = hits[0]
+                return (
+                    f"✅ Service: {description}\n"
+                    f"💰 Price: ₹{price}\n"
+                    f"📊 GST Rate: {gst_rate}%\n"
+                    f"🧾 GST Amount: ₹{gst_amount:.2f}\n"
+                    f"💵 Total Amount: ₹{total:.2f}"
+                )
+            else:
+                return (
+                    f"✅ Service: {description}\n"
+                    f"📊 GST Rate: {gst_rate}%\n"
+                    f"ℹ️ (Enter price to calculate GST amount)"
+                )
 
-        # 🔥 Threshold (important)
-        if best['score'] < 0.3:
-            return None
-
-        row = self.df.iloc[best['corpus_id']]
-
-        return {
-            "description": row['Description of Service'],
-            "cgst": row['CGST Rate (%)'],
-            "sgst": row['SGST/UTGST Rate (%)'],
-            "igst": row['IGST Rate (%)'],
-            "chapter": row['Chapter / Section / Heading'],
-            "condition": row.get('Condition', 'N/A')
-        }
+        except Exception as e:
+            return f"❌ Error: {str(e)}"

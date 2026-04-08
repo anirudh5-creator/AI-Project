@@ -1,4 +1,5 @@
 import sys
+print(sys.executable)
 import re
 
 from PyQt5.QtWidgets import (
@@ -20,8 +21,8 @@ class GSTApp(QWidget):
         super().__init__()
 
         # 🔥 Load retrievers
-        self.service_retriever = GSTRetriever("data/gst_services_cleaned.csv")
-        self.goods_retriever = GoodsRetriever("data/GST_Goods_Rates.csv")
+        self.service_retriever = GSTRetriever("gst_services_cleaned.csv")
+        self.goods_retriever = GoodsRetriever("GST_Goods_Rates.csv")
 
         self.initUI()
 
@@ -31,30 +32,26 @@ class GSTApp(QWidget):
 
         layout = QVBoxLayout()
 
-        # 🔹 Input
         layout.addWidget(QLabel("Enter your query:"))
         self.input_box = QLineEdit()
         layout.addWidget(self.input_box)
 
-        # 🔹 Dropdown
         layout.addWidget(QLabel("Select Type:"))
         self.type_selector = QComboBox()
         self.type_selector.addItems(["Service", "Goods"])
         layout.addWidget(self.type_selector)
 
-        # 🔹 Button
         self.btn = QPushButton("Process")
         self.btn.clicked.connect(self.process)
         layout.addWidget(self.btn)
 
-        # 🔹 Output
         self.output = QTextEdit()
         self.output.setReadOnly(True)
         layout.addWidget(self.output)
 
         self.setLayout(layout)
 
-    # 🔥 Correct GST extraction (fixes wrong column issue)
+    # 🔹 Extract GST rate
     def extract_rate(self, row):
         try:
             igst = str(row.get("IGST Rate (%)", "")).replace('%', '').strip()
@@ -68,6 +65,11 @@ class GSTApp(QWidget):
         except:
             return 0.0
 
+    # 🔹 Extract price
+    def extract_price(self, query):
+        numbers = re.findall(r'\d+', query)
+        return int(numbers[0]) if numbers else None
+
     def process(self):
         query = self.input_box.text().strip()
         if not query:
@@ -75,10 +77,10 @@ class GSTApp(QWidget):
 
         type_ = self.type_selector.currentText().lower()
 
-        # 🔹 Extract price
-        price = self.service_retriever.extract_price(query)
+        # 🔥 Extract price
+        price = self.extract_price(query)
         if price is None:
-            self.output.setText("❌ Could not detect price.")
+            self.output.setText("❌ Please include a price (e.g., 'restaurant service 1000').")
             return
 
         # ======================
@@ -86,10 +88,8 @@ class GSTApp(QWidget):
         # ======================
         if type_ == "goods":
 
-            # 🔹 Retrieve top candidates
             candidates = self.goods_retriever.get_top_k(query, k=7)
 
-            # 🔥 Remove generic junk like "Nil rate"
             candidates = [
                 c for c in candidates
                 if "nil rate" not in c["text"].lower()
@@ -99,20 +99,22 @@ class GSTApp(QWidget):
                 self.output.setText("❌ No goods match found.")
                 return
 
-            # 🔹 LLM selection (mode = goods)
-            best_row = select_best(query, candidates, mode="goods")
+            best_item = select_best(query, candidates, mode="goods")
 
-            if best_row is None:
+            if best_item is None:
                 self.output.setText("❌ Could not determine best goods category.")
                 return
 
-            # 🔹 Extract GST rate correctly
+            # 🔥 handle both formats
+            if isinstance(best_item, dict) and "row" in best_item:
+                best_row = best_item["row"]
+            else:
+                best_row = best_item
+
             rate = self.extract_rate(best_row)
 
-            # 🔹 Calculate GST
             amt, total = calculate_gst(price, rate)
 
-            # 🔹 Display
             self.output.setText(f"""
 CATEGORY: Goods
 
@@ -130,47 +132,45 @@ TOTAL: ₹{total:,.2f}
         # 🔥 SERVICE PIPELINE
         # ======================
 
-        # 🔹 Rewrite query
         rewritten_query = rewrite_query(query)
         rewritten_query = rewritten_query.replace('"', '').strip()
 
         print("Original:", query)
         print("Rewritten:", rewritten_query)
 
-        # 🔹 Retrieve candidates
         candidates = self.service_retriever.get_top_k(rewritten_query, k=3)
 
         if not candidates:
             self.output.setText("❌ No service match found.")
             return
 
-        # 🔹 LLM selection (mode = service)
-        best_row = select_best(rewritten_query, candidates, mode="service")
+        best_item = select_best(rewritten_query, candidates, mode="service")
 
-        if best_row is None:
+        if best_item is None:
             self.output.setText("❌ Could not determine best service category.")
             return
+
+        # 🔥 handle both formats
+        if isinstance(best_item, dict) and "row" in best_item:
+            best_row = best_item["row"]
+        else:
+            best_row = best_item
 
         gst_info = {
             "description": best_row['Description of Service'],
             "chapter": best_row['Chapter / Section / Heading']
         }
 
-        # 🔹 Extract rate
         rate = self.extract_rate(best_row)
 
-        # 🔹 Calculate GST
         amt, total = calculate_gst(price, rate)
 
-        # 🔹 Explanation
         explanation = generate_response(
             query, gst_info["description"], rate, price, amt, total
         )
 
-        # 🔥 Clean weird terminal characters
         explanation = re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', explanation)
 
-        # 🔹 Display
         res = f"ORIGINAL: {query}\n"
         res += f"INTERPRETED: {rewritten_query}\n\n"
         res += f"MATCH: {gst_info['description']}\n"
